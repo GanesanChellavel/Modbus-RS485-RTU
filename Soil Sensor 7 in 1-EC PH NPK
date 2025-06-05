@@ -1,0 +1,77 @@
+RS485 Modbus Soil Sensor 7 in 1 Measure Soil Moisture Temperature Humidity EC PH NPK
+salve id - 1
+baud rate 4800
+stop bit 1
+parity - none
+data type 16 bit uint16
+
+Read 7 input registers from address 0
+Moisture  address 0
+Temperature        1
+EC (Conductivity   2
+pH                 3
+Nitrogen           4
+Phosphorus         5
+Potassium          6
+
+-----------------------------------------------------------------------------------------------------------------------
+#include <ModbusMaster.h>
+#include <SoftwareSerial.h>
+
+// Define RS485 TX/RX pins (adjust for your ESP8266 board)
+#define RX_PIN 12 // D6
+#define TX_PIN 13 // D7
+
+// Create Modbus serial connection
+SoftwareSerial modbusSerial(RX_PIN, TX_PIN); // RX, TX
+ModbusMaster node;
+
+void preTransmission() {
+  digitalWrite(LED_BUILTIN, HIGH); // Indicate transmission
+}
+
+void postTransmission() {
+  digitalWrite(LED_BUILTIN, LOW); // End transmission
+}
+
+void setup() {
+  pinMode(LED_BUILTIN, OUTPUT);
+
+  Serial.begin(115200); // Debug output
+  delay(1000);
+
+  modbusSerial.begin(4800); // Modbus RTU baud rate
+  node.begin(1, modbusSerial); // Slave ID 1
+  node.preTransmission(preTransmission);
+  node.postTransmission(postTransmission);
+}
+
+void loop() {
+  uint8_t result = node.readInputRegisters(0x0000, 7); // Read 7 input registers from address 0
+
+  if (result == node.ku8MBSuccess) {
+    uint16_t moisture = node.getResponseBuffer(0);
+    int16_t temperature = (int16_t)node.getResponseBuffer(1); // signed value
+    uint16_t ec = node.getResponseBuffer(2);
+    float ph = node.getResponseBuffer(3) / 10.0;
+    uint16_t nitrogen = node.getResponseBuffer(4);
+    uint16_t phosphorus = node.getResponseBuffer(5);
+    uint16_t potassium = node.getResponseBuffer(6);
+
+    Serial.println("===== Soil Sensor Data =====");
+    Serial.print("Moisture: "); Serial.print(moisture); Serial.println(" %");
+    Serial.print("Temperature: "); Serial.print(temperature); Serial.println(" °C");
+    Serial.print("EC (Conductivity): "); Serial.print(ec); Serial.println(" µS/cm");
+    Serial.print("pH: "); Serial.println(ph);
+    Serial.print("Nitrogen (N): "); Serial.print(nitrogen); Serial.println(" mg/kg");
+    Serial.print("Phosphorus (P): "); Serial.print(phosphorus); Serial.println(" mg/kg");
+    Serial.print("Potassium (K): "); Serial.print(potassium); Serial.println(" mg/kg");
+    Serial.println("============================\n");
+
+  } else {
+    Serial.print("Modbus Read Error: ");
+    Serial.println(result);
+  }
+
+  delay(5000); // Read every 5 seconds
+}
