@@ -1,0 +1,177 @@
+#include <ModbusMaster.h>
+#include <SoftwareSerial.h>
+//#include <ESP8266WiFi.h>  // Needed for watchdog functions
+
+// RS485 Soil Sensor Serial (D6=D12=RX, D7=D13=TX)
+#define RS485_RX 12
+#define RS485_TX 13
+SoftwareSerial rs485Serial(RS485_RX, RS485_TX);
+ModbusMaster node;
+
+// SIM7600E Serial (D3=D1=RX, D1=D3=TX)
+SoftwareSerial gsmSerial(3, 1);
+
+// MQTT Config
+const char* apn = "stmiot";
+const char* mqttServer = "test.mosquitto.org";
+const int mqttPort = 1883;
+const char* mqttClientID = "ESP8266-A7670E";
+const char* mqttTopic = "sal/aws/555555";
+
+// Delay between sends
+unsigned long interval = 5UL * 60UL * 1000UL;
+
+void preTransmission() {
+  digitalWrite(LED_BUILTIN, HIGH);
+}
+void postTransmission() {
+  digitalWrite(LED_BUILTIN, LOW);
+}
+
+void sendAT(const char* cmd, const char* expected, unsigned long timeout = 3000) {
+  gsmSerial.println(cmd);
+  unsigned long start = millis();
+  while (millis() - start < timeout) {
+    if (gsmSerial.find(const_cast<char*>(expected))) {
+      Serial.println(String("[OK] ") + cmd);
+      return;
+    }
+    yield(); // Feed watchdog
+  }
+  Serial.println(String("[ERR] ") + cmd);
+}
+
+void setupGSM() {
+  sendAT("AT", "OK");
+  sendAT("ATE0", "OK");
+  sendAT("AT+CPIN?", "READY");
+  sendAT("AT+CSQ", "OK");
+  sendAT("AT+CREG?", "0,1");
+  sendAT("AT+CGATT=1", "OK");
+  String cmd = "AT+CGDCONT=1,\"IP\",\"" + String(apn) + "\"";
+  sendAT(cmd.c_str(), "OK");
+  sendAT("AT+CSOCKSETPN=1", "OK");
+  sendAT("AT+NETOPEN", "OK", 10000);
+  delay(2000); yield();
+}
+
+void connectTCP() {
+  sendAT("AT+CIPCLOSE=0", "OK", 3000);
+  sendAT("AT+NETCLOSE", "OK", 5000);
+  delay(1000); yield();
+  sendAT("AT+NETOPEN", "OK", 10000);
+  delay(1000); yield();
+  String cmd = "AT+CIPOPEN=0,\"TCP\",\"" + String(mqttServer) + "\"," + String(mqttPort);
+  sendAT(cmd.c_str(), "OK", 10000);
+  delay(2000); yield();
+}
+
+void mqttConnect() {
+  uint8_t packet[128];
+  int pos = 0;
+  packet[pos++] = 0x10;
+  uint8_t remLen = 10 + 2 + strlen(mqttClientID);
+  packet[pos++] = remLen;
+  packet[pos++] = 0x00; packet[pos++] = 0x04;
+  packet[pos++] = 'M'; packet[pos++] = 'Q'; packet[pos++] = 'T'; packet[pos++] = 'T';
+  packet[pos++] = 0x04;
+  packet[pos++] = 0x02;
+  packet[pos++] = 0x00; packet[pos++] = 60;
+  packet[pos++] = 0x00;
+  packet[pos++] = strlen(mqttClientID);
+  memcpy(&packet[pos], mqttClientID, strlen(mqttClientID));
+  pos += strlen(mqttClientID);
+
+  String cmd = "AT+CIPSEND=0," + String(pos);
+  sendAT(cmd.c_str(), ">", 3000);
+  gsmSerial.write(packet, pos);
+  delay(2000); yield();
+}
+
+void mqttPublish(const char* topic, const char* payload) {
+  int topicLength = strlen(topic);
+  int payloadLength = strlen(payload);
+  int remLen = 2 + topicLength + payloadLength;
+
+  uint8_t packet[256];
+  int pos = 0;
+  packet[pos++] = 0x30;
+  packet[pos++] = remLen;
+  packet[pos++] = (topicLength >> 8) & 0xFF;
+  packet[pos++] = topicLength & 0xFF;
+  memcpy(&packet[pos], topic, topicLength); pos += topicLength;
+  memcpy(&packet[pos], payload, payloadLength); pos += payloadLength;
+
+  String cmd = "AT+CIPSEND=0," + String(pos);
+  sendAT(cmd.c_str(), ">", 3000);
+  gsmSerial.write(packet, pos);
+  delay(2000); yield();
+}
+
+void closeConnection() {
+  sendAT("AT+CIPCLOSE=0", "OK", 5000);
+  sendAT("AT+NETCLOSE", "OK", 5000);
+  delay(1000); yield();
+}
+
+void setup() {
+  pinMode(LED_BUILTIN, OUTPUT);
+  Serial.begin(115200);
+  gsmSerial.begin(115200);
+  rs485Serial.begin(4800);
+  node.begin(1, rs485Serial);
+  node.preTransmission(preTransmission);
+  node.postTransmission(postTransmission);
+
+  ESP.wdtEnable(5000);  // Enable 5s watchdog timeout
+
+  Serial.println("Initializing SIM7600E...");
+  setupGSM();
+}
+
+void loop() {
+  ESP.wdtFeed(); // Reset watchdog before starting
+  uint8_t result = node.readHoldingRegisters(0x0000, 7);
+
+  //uint8_t result = node.readInputRegisters(0x0000, 7);
+  yield();
+
+  if (result == node.ku8MBSuccess) {
+    uint16_t moisture = node.getResponseBuffer(0);
+    int16_t temperature = (int16_t)node.getResponseBuffer(1);
+    uint16_t ec = node.getResponseBuffer(2);
+    float ph = node.getResponseBuffer(3) / 10.0;
+    uint16_t nitrogen = node.getResponseBuffer(4);
+    uint16_t phosphorus = node.getResponseBuffer(5);
+    uint16_t potassium = node.getResponseBuffer(6);
+
+    String payload = "{";
+    payload += "\"device_id\":\"291054\",";
+    payload += "\"orgname\":\"testing\",";
+    payload += "\"Moisture\":" + String(moisture) + ",";
+    payload += "\"Temperature\":" + String(temperature) + ",";
+    payload += "\"EC\":" + String(ec) + ",";
+    payload += "\"pH\":" + String(ph, 1) + ",";
+    payload += "\"N\":" + String(nitrogen) + ",";
+    payload += "\"P\":" + String(phosphorus) + ",";
+    payload += "\"K\":" + String(potassium);
+    payload += "}";
+
+    Serial.println("Connecting to MQTT broker...");
+    connectTCP(); yield();
+    mqttConnect(); yield();
+    mqttPublish(mqttTopic, payload.c_str()); yield();
+    closeConnection(); yield();
+
+    Serial.println("Data sent. Waiting for next cycle...");
+  } else {
+    Serial.print("Modbus Read Error: ");
+    Serial.println(result);
+  }
+
+  // Feed watchdog periodically during long delay
+  for (unsigned long t = 0; t < interval; t += 1000) {
+    delay(1000);
+    ESP.wdtFeed();
+  }
+}
