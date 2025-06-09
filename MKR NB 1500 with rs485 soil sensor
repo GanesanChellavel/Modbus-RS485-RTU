@@ -1,0 +1,55 @@
+#include <ModbusMaster.h>
+
+// Use the hardware Serial1 on MKR NB 1500
+// TX = Pin 14, RX = Pin 13 on MKR NB 1500
+ModbusMaster node;
+
+void preTransmission() {
+  digitalWrite(LED_BUILTIN, HIGH); // Indicate transmission
+}
+
+void postTransmission() {
+  digitalWrite(LED_BUILTIN, LOW); // End transmission
+}
+
+void setup() {
+  pinMode(LED_BUILTIN, OUTPUT);
+
+  Serial.begin(115200); // Debug output
+  while (!Serial); // Wait for Serial Monitor
+
+  Serial1.begin(4800); // Modbus RTU baud rate
+  node.begin(1, Serial1); // Slave ID 1
+  node.preTransmission(preTransmission);
+  node.postTransmission(postTransmission);
+}
+
+void loop() {
+  uint8_t result = node.readInputRegisters(0x0000, 7); // Read 7 input registers
+
+  if (result == node.ku8MBSuccess) {
+    uint16_t moisture = node.getResponseBuffer(0);
+    int16_t temperature = (int16_t)node.getResponseBuffer(1); // signed value
+    uint16_t ec = node.getResponseBuffer(2);
+    float ph = node.getResponseBuffer(3) / 10.0;
+    uint16_t nitrogen = node.getResponseBuffer(4);
+    uint16_t phosphorus = node.getResponseBuffer(5);
+    uint16_t potassium = node.getResponseBuffer(6);
+
+    Serial.println("===== Soil Sensor Data =====");
+    Serial.print("Moisture: "); Serial.print(moisture); Serial.println(" %");
+    Serial.print("Temperature: "); Serial.print(temperature); Serial.println(" °C");
+    Serial.print("EC (Conductivity): "); Serial.print(ec); Serial.println(" µS/cm");
+    Serial.print("pH: "); Serial.println(ph);
+    Serial.print("Nitrogen (N): "); Serial.print(nitrogen); Serial.println(" mg/kg");
+    Serial.print("Phosphorus (P): "); Serial.print(phosphorus); Serial.println(" mg/kg");
+    Serial.print("Potassium (K): "); Serial.print(potassium); Serial.println(" mg/kg");
+    Serial.println("============================\n");
+
+  } else {
+    Serial.print("Modbus Read Error: ");
+    Serial.println(result);
+  }
+
+  delay(5000); // Read every 5 seconds
+}
